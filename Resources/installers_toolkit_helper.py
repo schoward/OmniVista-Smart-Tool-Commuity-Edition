@@ -1,16 +1,18 @@
 #!/bin/python3
 
-#Pushed by the toolkit to assist with IP discovery. This is a legit python script. 
-#do not panic, do not delete, aliens have not invaded Earth and you will be OK, mostly.
+# Pushed by the toolkit to assist with IP discovery. This is a legit python script.
+# do not panic, do not delete, aliens have not invaded Earth and you will be OK, mostly.
 
-#There is no good way to map MAC address to IP address in general.
+# There is no good way to map MAC address to IP address in general.
 #
-#This script will first fetch valid IP interfaces on the switch and calculate the known subnets.
-#We then skip all Loopback and EMP  IP interfaces.
+# Updated with IPC communications to help prevent more than 1 script running at a time.
+# SRH - 1-16-2026
+# This script will first fetch valid IP interfaces on the switch and calculate the known subnets.
+# We then skip all Loopback and EMP  IP interfaces.
 #
-#Using the lowest priority queue on the switch, we ping every possible IP on the subnet.
-#ARP cache by default is only 5 mins.  This means the script can't run longer than that.
-#
+# Using the lowest priority queue on the switch, we ping every possible IP on the subnet.
+# ARP cache by default is only 5 mins. This means the script can't run longer than that.
+
 import os
 import subprocess
 import threading
@@ -21,39 +23,8 @@ import sys
 import ipaddress
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-
-# -------------------- Logging Setup --------------------
-LOG_FILE = "console.log"
-# Remove old log file if it exists
-if os.path.exists(LOG_FILE):
-    os.remove(LOG_FILE)
-
-# Open the log file in write mode with line buffering.
-log_file_handle = open(LOG_FILE, "w", buffering=1)
-
-class Logger:
-    def __init__(self, terminal, log):
-        #self.terminal = terminal
-        self.log = log
-        self.buffer = ""
-
-    def write(self, message):
-        self.buffer += message
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            formatted_line = f"[{timestamp}] {line}\n"
-            #self.terminal.write(formatted_line)
-            self.log.write(formatted_line)
-
-    def flush(self):
-        #self.terminal.flush()
-        self.log.flush()
-
-# Redirect stdout and stderr to the Logger.
-sys.stdout = Logger(sys.stdout, log_file_handle)
-sys.stderr = Logger(sys.stderr, log_file_handle)
-# -------------------------------------------------------
+import socket
+import atexit
 
 LARGE_SUBNET_WARNING = 22  # Flag subnets larger than /22
 MAX_CONCURRENT_PINGS = 256  # Number of parallel pings allowed
@@ -70,13 +41,150 @@ subnet_priority = defaultdict(int)  # Tracks subnet popularity from ARP table
 mac_lock = threading.Lock()
 stop_threads = threading.Event()
 
-# Gracefully handle Ctrl+C (^C)
-def handle_exit(sig, frame):
-    print("\n[!] Caught Ctrl+C, exiting cleanly...")
-    stop_threads.set()  # Stop threads
-    sys.exit(0)
+# Presence socket for liveness detection
+SOCK_PATH = "/dev/shm/installers_toolkit_helper.sock"
 
-signal.signal(signal.SIGINT, handle_exit)
+# -------------------- Logging Setup --------------------
+LOG_FILE = "console.log"
+log_file_handle = None
+
+class Logger:
+    def __init__(self, terminal, log):
+        # self.terminal = terminal
+        self.log = log
+        self.buffer = ""
+
+    def write(self, message):
+        self.buffer += message
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            formatted_line = f"[{timestamp}] {line}\n"
+            # self.terminal.write(formatted_line)
+            self.log.write(formatted_line)
+
+    def flush(self):
+        # self.terminal.flush()
+        self.log.flush()
+
+def init_logging():
+    global log_file_handle
+
+    # Remove old log file if it exists (only after we know we are the active instance)
+    if os.path.exists(LOG_FILE):
+        try:
+            os.remove(LOG_FILE)
+        except OSError:
+            pass
+
+    # Open the log file in write mode with line buffering.
+    log_file_handle = open(LOG_FILE, "w", buffering=1)
+
+    # Redirect stdout and stderr to the Logger.
+    sys.stdout = Logger(sys.stdout, log_file_handle)
+    sys.stderr = Logger(sys.stderr, log_file_handle)
+
+    def close_log():
+        try:
+            if log_file_handle:
+                log_file_handle.flush()
+                log_file_handle.close()
+        except OSError:
+            pass
+
+    atexit.register(close_log)
+# -------------------------------------------------------
+
+def start_presence_socket():
+    # If a socket path exists, first see if someone is actually listening
+    if os.path.exists(SOCK_PATH):
+        test = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            test.settimeout(0.5)
+            test.connect(SOCK_PATH)
+
+            # Connect worked: another instance is alive
+            msg = "installers_toolkit_helper: another instance is already running\n"
+            try:
+                sys.stderr.write(msg)
+            except Exception:
+                pass
+            try:
+                sys.stdout.write(msg)
+            except Exception:
+                pass
+            sys.exit(1)
+
+        except OSError:
+            # Connect failed: stale path, safe to remove
+            try:
+                os.unlink(SOCK_PATH)
+            except OSError:
+                # Cannot unlink -> safer to exit
+                try:
+                    sys.stderr.write(
+                        "installers_toolkit_helper: stale socket path exists and cannot be removed\n"
+                    )
+                except Exception:
+                    pass
+                sys.exit(1)
+
+        finally:
+            try:
+                test.close()
+            except OSError:
+                pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(SOCK_PATH)
+    except OSError as e:
+        try:
+            sys.stderr.write(
+                f"installers_toolkit_helper: failed to bind presence socket: {e}\n"
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
+    server.listen(1)
+
+    def cleanup():
+        try:
+            server.close()
+        except OSError:
+            pass
+        try:
+            if os.path.exists(SOCK_PATH):
+                os.unlink(SOCK_PATH)
+        except OSError:
+            pass
+
+    atexit.register(cleanup)
+
+    def presence_loop():
+        while not stop_threads.is_set():
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                break
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    t = threading.Thread(target=presence_loop, daemon=True)
+    t.start()
+    return server
+
+# Gracefully handle Ctrl+C (^C) and SIGTERM
+def handle_exit(sig, frame):
+    try:
+        print("\n[!] Caught exit signal, exiting cleanly...")
+    except Exception:
+        pass
+    stop_threads.set()
+    sys.exit(0)
 
 # Run "show arp" and analyze the most populated subnets
 def analyze_arp_table():
@@ -95,7 +203,9 @@ def analyze_arp_table():
 
         if subnet_priority:
             print("\n[+] Most populated subnets (based on ARP table):")
-            for subnet, count in sorted(subnet_priority.items(), key=lambda x: x[1], reverse=True):
+            for subnet, count in sorted(
+                subnet_priority.items(), key=lambda x: x[1], reverse=True
+            ):
                 print(f"    {subnet} - {count} devices")
 
     except Exception as e:
@@ -121,10 +231,14 @@ def get_interfaces():
                 # Check subnet size and warn if too large
                 prefix_length = ipaddress.IPv4Network(f"{ip}/{subnet}", strict=False).prefixlen
                 if prefix_length < LARGE_SUBNET_WARNING:
-                    print(f"[WARNING] Skipping {name} ({ip}/{subnet}) - Subnet too large (/<{LARGE_SUBNET_WARNING})")
+                    print(
+                        f"[WARNING] Skipping {name} ({ip}/{subnet}) - Subnet too large (/<{LARGE_SUBNET_WARNING})"
+                    )
                     continue  # Skip subnets larger than /22
 
-                interfaces.append({"name": name, "ip": ip, "subnet": subnet, "status": status, "device": device})
+                interfaces.append(
+                    {"name": name, "ip": ip, "subnet": subnet, "status": status, "device": device}
+                )
         return interfaces
 
     except Exception as e:
@@ -136,8 +250,11 @@ def generate_ip_list():
     print("\n[+] Subnets to be scanned (prioritized by ARP table):")
 
     prioritized_interfaces = sorted(
-        interfaces, key=lambda x: subnet_priority.get(str(ipaddress.IPv4Network(f"{x['ip']}/24", strict=False)), 0),
-        reverse=True
+        interfaces,
+        key=lambda x: subnet_priority.get(
+            str(ipaddress.IPv4Network(f"{x['ip']}/24", strict=False)), 0
+        ),
+        reverse=True,
     )
 
     for iface in prioritized_interfaces:
@@ -155,7 +272,11 @@ def generate_ip_list():
 def ping_ip(ip):
     if stop_threads.is_set():
         return
-    proc = subprocess.Popen(["ping", ip, "count", "1", "timeout", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(
+        ["ping", ip, "count", "1", "timeout", "1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     proc.wait()
     if proc.returncode == 0:
         print(f"[UP] {ip}")
@@ -170,6 +291,16 @@ def ping_all_ips():
 
 # Main execution
 if __name__ == "__main__":
+    # Start presence socket first (do not touch console.log unless we will actually run)
+    presence_socket = start_presence_socket()
+
+    # Now that we are the active instance, overwrite the log and redirect output
+    init_logging()
+
+    # Handle SIGINT and SIGTERM
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
     print("[*] Starting network discovery...\n")
 
     # Get ARP-based priority before scanning
@@ -191,4 +322,4 @@ if __name__ == "__main__":
 
     print("[+] Scan complete.")
 
-#End
+# End

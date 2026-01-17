@@ -225,6 +225,9 @@ namespace PoEWizard.Comm
             if (closeProgressBar) CloseProgressBar();
         }
 
+        // Simulate df -h using just basic switch commands show hardware-info and freespace.
+        // Return in a format the caller expects.
+        // AOS 8.10 R4 breaks su mode.  This is the compromise
         private void UpdateFlashInfo(string source)
         {
             try
@@ -233,22 +236,71 @@ namespace PoEWizard.Comm
                 {
                     try
                     {
-                        ConnectAosSsh();
+                        // Get hardware info (includes flash size per chassis)
+                        var hwInfoList = SendCommand(new CmdRequest(Command.SHOW_HW_INFO, ParseType.MVTable, DictionaryType.HwInfo)) as List<Dictionary<string, string>>;
+
+                        // Get free space per chassis
+                        string freeSpaceResponse = SendCommand(new CmdRequest(Command.SHOW_FREE_SPACE, ParseType.NoParsing)).ToString();
+
+                        // Parse free space inline
+                        Dictionary<int, long> freeSpaceByChassisId = new Dictionary<int, long>();
+                        if (!string.IsNullOrEmpty(freeSpaceResponse))
+                        {
+                            string[] lines = freeSpaceResponse.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                            foreach (string line in lines)
+                            {
+                                // Looking for: "Chassis 1 /flash 697290752 bytes free"
+                                string trimmed = line.Trim();
+                                if (trimmed.Contains("Chassis") && trimmed.Contains("/flash") && trimmed.Contains("bytes free"))
+                                {
+                                    string[] parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                    if (parts.Length >= 5 && int.TryParse(parts[1], out int chassisId) && long.TryParse(parts[3], out long freeBytes))
+                                    {
+                                        freeSpaceByChassisId[chassisId] = freeBytes;
+                                    }
+                                }
+                            }
+                        }
+
                         foreach (ChassisModel chassis in SwitchModel.ChassisList)
                         {
-                            LinuxCommandSeq cmdSeq;
-                            if (chassis.IsMaster) cmdSeq = new LinuxCommandSeq();
-                            else cmdSeq = new LinuxCommandSeq(new LinuxCommand($"ssh-chassis {SwitchModel.Login}@{chassis.Number}", "Password|Are you sure", 20));
-                            Thread.Sleep(500);
-                            cmdSeq.AddCommandSeq(new List<LinuxCommand> { new LinuxCommand("su", "->"), new LinuxCommand("df -h", "->"), new LinuxCommand("exit") });
-                            cmdSeq = SendSshLinuxCommandSeq(cmdSeq, $"{Translate("i18n_flashd")} {chassis.Number}");
-                            _dict = cmdSeq?.GetResponse("df -h");
-                            if (_dict != null && _dict.ContainsKey(OUTPUT)) SwitchModel.LoadFlashSizeFromList(_dict[OUTPUT], chassis);
+                            // Find hardware info for this chassis
+                            var hwInfo = hwInfoList?.FirstOrDefault(d => d.ContainsKey("Chassis") && d["Chassis"] == chassis.Number.ToString());
+
+                            if (hwInfo != null && hwInfo.ContainsKey("Flash size") && freeSpaceByChassisId.ContainsKey(chassis.Number))
+                            {
+                                // Parse flash size: "953257984 bytes" -> bytes
+                                string flashSizeStr = hwInfo["Flash size"].Replace("bytes", "").Trim();
+                                if (long.TryParse(flashSizeStr, out long totalBytes))
+                                {
+                                    long freeBytes = freeSpaceByChassisId[chassis.Number];
+                                    long usedBytes = totalBytes - freeBytes;
+
+                                    // Convert to MB
+                                    double totalMb = totalBytes / 1048576.0;
+                                    double usedMb = usedBytes / 1048576.0;
+                                    double availMb = freeBytes / 1048576.0;
+                                    int usePct = (totalBytes > 0) ? (int)((usedBytes * 100.0) / totalBytes) : 0;
+
+                                    // Synthesize df -h format
+                                    string dfLike =
+                                        "Filesystem                Size      Used Available Use% Mounted on\n" +
+                                        string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                            "ubi0:flash              {0:0.0}M    {1:0.0}M    {2:0.0}M  {3}% /flash\n",
+                                            totalMb, usedMb, availMb, usePct);
+
+                                    SwitchModel.LoadFlashSizeFromList(dfLike, chassis);
+
+                                    Logger.Debug($"UpdateFlashInfo: REST API (chassis={chassis.Number}, total={totalMb:0.0}M, used={usedMb:0.0}M, avail={availMb:0.0}M, use={usePct}%)");
+                                }
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
                         Logger.Error(ex);
+
+                        // Fallback
                         string response = SendCommand(new CmdRequest(Command.SHOW_FREE_SPACE, ParseType.NoParsing)).ToString();
                         if (!string.IsNullOrEmpty(response)) SwitchModel.LoadFreeFlashFromList(response);
                     }
@@ -259,6 +311,7 @@ namespace PoEWizard.Comm
                 SendSwitchError(source, ex);
             }
         }
+
 
         /// <summary>
         /// Enables REST API service on the switch by configuring required services and authentication.

@@ -66,29 +66,57 @@ namespace PoEWizard.Device
             }
         }
 
+        //Modified by SRH to eliminate the need for su mode but still verify if the helper script is running or not.
+        //Note this depends on the udpated script that creates and response on the IPC socket.
         public static async Task<bool> IsIpScanRunning()
         {
-            LinuxCommand suCmd = new LinuxCommand("su", "Entering maintenance shell");
-            LinuxCommand psCmd = new LinuxCommand("ps -e | grep python", "#->");
-            LinuxCommand exitCmd = new LinuxCommand("exit");
-            Task<bool> task = Task<bool>.Factory.StartNew(() =>
+            return await Task.Run(() =>
             {
+                string Trunc(string s, int max)
+                {
+                    if (s == null) return "";
+                    // Make log-friendly and visible
+                    s = s.Replace("\r", "\\r").Replace("\n", "\\n");
+                    return (s.Length <= max) ? s : s.Substring(0, max) + "...";
+                }
+
+                // -  Exits 0/1 so humans can test from CLI if needed.
+                const string sockPath = "/dev/shm/installers_toolkit_helper.sock";
+                string cmd =
+                    "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(.5); " +
+                    "r=s.connect_ex(\"" + sockPath + "\"); r==0 and sys.stdout.write(\"RUNNING\\n\"); " +
+                    "sys.exit(0 if r==0 else 1)'";
+
+                // MaxWaitSec must cover the 0.5s socket timeout plus SSH jitter + parsing
+                // You were seeing ~2-4 sec failures; give it breathing room.
+                var probeCmd = new LinuxCommand(cmd, null, 8);
+
                 try
                 {
-                    sshService.SendLinuxCommand(suCmd);
-                    psCmd.Response = sshService.SendLinuxCommand(psCmd);
-                    sshService.SendLinuxCommand(exitCmd);
-                    string output = psCmd?.Response["output"] ?? "";
-                    return output.Contains(REM_PATH);
+                    Logger.Debug($"IsIpScanRunning: IPC probe starting (cmdLen={cmd.Length}, maxWaitSec={probeCmd.MaxWaitSec})");
+
+                    Dictionary<string, string> resp = sshService.SendLinuxCommand(probeCmd);
+
+                    string output = "";
+                    if (resp != null && resp.ContainsKey("output") && resp["output"] != null)
+                        output = resp["output"];
+
+                    bool running = output.IndexOf("RUNNING", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                    Logger.Debug(
+                        "IsIpScanRunning: IPC probe completed " +
+                        $"(running={running}, outLen={output.Length}, outHead=\"{Trunc(output, 300)}\")");
+
+                    return running;
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error("Error checking if IP address scan is running", ex);
-                    sshService.SendLinuxCommand(exitCmd);
+                    // This is the critical troubleshooting signal:
+                    // if it still times out, we know the command echo is still being altered.
+                    Logger.Error($"IsIpScanRunning: IPC probe threw exception: {ex.Message}", ex);
                     return false;
                 }
             });
-            return await task;
         }
 
         public static int GetOpenPort(string host)

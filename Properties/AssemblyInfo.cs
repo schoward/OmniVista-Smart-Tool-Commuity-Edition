@@ -10,7 +10,7 @@ using System.Windows;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("Alcatel-Lucent Enterprise")]
 [assembly: AssemblyProduct("OmniVista Smart Tool")]
-[assembly: AssemblyCopyright("©  ALE International, ALE USA Inc. All rights reserved in all countries.")]
+[assembly: AssemblyCopyright("© 2024 ALE USA, 2024-2026 Community Edition. MIT License.")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -49,5 +49,6 @@ using System.Windows;
 // You can specify all the values or you can default the Build and Revision Numbers
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("2.4.1.0")]
-[assembly: AssemblyFileVersion("2.4.1.0")]
+[assembly: AssemblyVersion("2.4.5.0")]
+[assembly: AssemblyFileVersion("2.4.5.0")]
+[assembly: AssemblyInformationalVersion("2.4.5 CE")]

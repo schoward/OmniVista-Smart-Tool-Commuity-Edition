@@ -1995,8 +1995,32 @@ namespace PoEWizard
                     IpScan.Init(swModel);
                     if (IpScan.IsIpScanRunning().Result)
                     {
-                        res.ForEach(r => r[CURRENT] = r[ONE_HOUR_AVG]);
-                        Logger.Warn("Ip scan is running, using 1 hour cpu health data");
+                        res.ForEach(r =>
+                        {
+                            string fallbackValue = null;
+
+                            // Try 1 Hr Avg first
+                            if (r.ContainsKey(ONE_HOUR_AVG) && IsValidCpuValue(r[ONE_HOUR_AVG]))
+                            {
+                                fallbackValue = r[ONE_HOUR_AVG];
+                            }
+                            // Try 1 Min Avg second
+                            else if (r.ContainsKey(ONE_MIN_AVG) && IsValidCpuValue(r[ONE_MIN_AVG]))
+                            {
+                                fallbackValue = r[ONE_MIN_AVG];
+                            }
+                            // Use Current as last resort
+                            else if (r.ContainsKey(CURRENT) && IsValidCpuValue(r[CURRENT]))
+                            {
+                                fallbackValue = r[CURRENT];
+                            }
+
+                            if (fallbackValue != null)
+                            {
+                                r[CURRENT] = fallbackValue;
+                            }
+                        });
+                        Logger.Warn("Ip scan is running, using historical cpu health data");
                     }
                     swModel.LoadFromList(res, DictionaryType.CpuTrafficList);
                     //launch ip scanner after this
@@ -2016,6 +2040,14 @@ namespace PoEWizard
                     Logger.Error(ex);
                 }
             });
+        }
+
+        // Helper method - add this near DelayGetCpuHealth
+        private bool IsValidCpuValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return false;
+            if (!int.TryParse(value, out int cpu)) return false;
+            return cpu > 0 && cpu < 95;
         }
 
         private void DelayIpScan()

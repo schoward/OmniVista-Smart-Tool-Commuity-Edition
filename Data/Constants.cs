@@ -260,6 +260,7 @@ namespace PoEWizard.Data
         // Used by "SHOW_CHASSIS"
         public const string CHAS_DEVICE = "Chassis/Device";
         public const string CURRENT = "Current";
+        public const string ONE_MIN_AVG = "1 Min Avg";
         public const string ONE_HOUR_AVG = "1 Hr Avg";
         public const string RANGE = "Range";
         public const string DANGER = "Danger";
